@@ -1,0 +1,8 @@
+{
+  "isActive": true,
+  "targetPath": "../test_target/",
+  "useMaker" : false,
+  "srcFilesPath": "src",
+  "jsMakedPath": "foo",
+  "cssMakedPath": "bar"
+}
