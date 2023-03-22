@@ -1,8 +1,10 @@
 {
   "isActive": true,
   "targetPath": "../test_target/",
-  "useMaker" : false,
+  "useMaker" : true,
   "srcFilesPath": "src",
-  "jsMakedPath": "foo",
-  "cssMakedPath": "bar"
+  "makedPath": {
+    "js" : "folderToMakedfiles/js/site.js",
+    "css" : "folderToMakedfiles/site.css"
+  }
 }

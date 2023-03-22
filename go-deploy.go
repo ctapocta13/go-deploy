@@ -12,6 +12,8 @@ import (
 	"strings"
 )
 
+var settingsValues settings
+
 func main() {
 
 	// func Rename(oldpath, newpath string) error
@@ -19,10 +21,15 @@ func main() {
 	cmdProject := flag.String("project", "test_project", "Указываем папку проекта")
 	cmdTask := flag.Int("task", 0, "Указываем номер задачи по проекту")
 	cmdTest := flag.Bool("test", false, "Брать тестовые данные")
+	debug := flag.Bool("debug", false, "Отладка")
 
 	flag.Parse()
 
 	fmt.Println("-----------------------------------------------------------------------------")
+	if *cmdTask == 0 {
+		fmt.Println("Укажите номер задачи")
+		os.Exit(-1)
+	}
 	fmt.Println("Пытаемся разобрать изменения в проекте", *cmdProject, "по задаче", *cmdTask)
 
 	if err := os.Chdir(*cmdProject); err != nil { //Меняем директорию на рабочую или паникуем
@@ -35,11 +42,20 @@ func main() {
 	settingsFileData, err := os.ReadFile(settingsFileName)
 	checkFile(err)
 
-	var settingsValues settings
-
 	if err := json.Unmarshal(settingsFileData, &settingsValues); err != nil {
 		panic(err)
 	}
+
+	settingsValues.Verbose = false
+
+	if *debug {
+		settingsValues.Verbose = true
+	}
+
+	if settingsValues.Verbose {
+		fmt.Println(settingsValues)
+	}
+
 	if !settingsValues.IsActive {
 		fmt.Println("Проект не активен")
 		os.Exit(-1)
@@ -50,20 +66,22 @@ func main() {
 		gitText, err = exec.Command("git", "log", "--pretty=oneline").CombinedOutput()
 
 		if err != nil { //Ошибка выполнения команды
-			// panic("Ошибка при выполнении команды " + cmd.String())
-			panic(err)
+			fmt.Println("Ошибка при получении списка коммитов. Проверьте наличие проекта и настройки git")
+			os.Exit(-1)
 		}
 	} else {
 		gitText, err = os.ReadFile("test_gitlog.txt")
 		checkFile(err)
 	}
+	if *debug {
+		fmt.Println(string(gitText))
+	}
 
 	reg := regexp.MustCompile(`(?mU)^(\w+)\s.*(` + fmt.Sprintf("%d", *cmdTask) + `):?.*$`)
 
-	affectedFiles := make(map[string][]string)
+	affectedFiles := make(map[string]string)
 	for _, match := range reg.FindAllStringSubmatch(string(gitText), -1) {
 		if match[1] != "" {
-			files := make([]string, 0)
 			var gitFilesText []byte
 			if !*cmdTest {
 				gitFilesText, err = exec.Command("git", "diff-tree", "--no-commit-id", "--name-only", "-r", match[1]).CombinedOutput()
@@ -77,34 +95,48 @@ func main() {
 				checkFile(err)
 			}
 
-			lines := strings.Split(string(gitFilesText), "\n")
+			lines := strings.Split(strings.Trim(string(gitFilesText), "\n\r"), "\n") //Вывод обрезаем для исключения пустой строки
 
 			for i := range lines {
-				files = append(files, strings.Trim(lines[i], "\n\r "))
+				file := strings.Trim(lines[i], "\n\r ")
+				affectedFiles[file] = file
 			}
 
-			affectedFiles[match[1]] = files
 		}
 	}
+
 	if 0 == len(affectedFiles) {
-		fmt.Println("Коммитов по задаче не найдено")
+		fmt.Println("Изменений по задаче не найдено")
 		os.Exit(1)
 	}
-	deployAffected(affectedFiles, settingsValues)
+	deployAffectedFlat(affectedFiles)
 
 }
-
-func deployAffected(affectedFiles map[string][]string, settingsValues settings) {
+func deployAffectedFlat(affectedFiles map[string]string) {
 	for key := range affectedFiles {
-		fmt.Println("Разбираем коммит " + key)
-		for i := range affectedFiles[key] {
-			deployFile(affectedFiles[key][i], settingsValues)
-		}
+		deployFile(affectedFiles[key])
 	}
 }
 
-func deployFile(affectedFile string, settingsValues settings) {
+func deployFile(affectedFile string) {
 	dir, file := filepath.Split(affectedFile)
+	if file == ".gitignore" || file == ".gitkeep" || file == ".go-deploy-config.json" {
+		return
+	}
+	/*
+		if settingsValues.UseMaker { // Используется сборщик
+			ext := strings.Trim(filepath.Ext(file), ".")
+			fmt.Println("Возможно ориентироваться на .. или err != nil при определении вложенности папки")
+			rel, err := filepath.Rel(settingsValues.SrcFilesPath, dir)
+			fmt.Println(settingsValues.SrcFilesPath, dir, rel, err)
+
+			forType, exist := settingsValues.MakedPath[ext]
+			//exist показывает что настрока есть. если нет - можно не обрабатывать
+			fmt.Println(forType, exist)
+
+			return
+		}*/
+
 	targetFolder := filepath.Join(settingsValues.TargetPath, dir)
 	mustRemove := false
 	mustCreate := false
@@ -118,16 +150,6 @@ func deployFile(affectedFile string, settingsValues settings) {
 		fmt.Println("Ошибка получения информации о файле " + affectedFile + ". Удаляем целевой файл")
 		mustRemove = true
 	}
-
-	// fmt.Println("info:Name", info.Name())
-	// fmt.Println("info:Size", info.Size())
-	// fmt.Println("info:Mode", info.Mode().Perm())
-	// fmt.Printf("permissions: %#o\n", info.Mode().Perm()) // 0400, 0777, etc.
-	// fmt.Println("info:ModTime", info.ModTime())
-	// fmt.Println("info:ModTime", info.ModTime().Unix())
-	// fmt.Println("info:IsDir", info.IsDir())
-	// fmt.Println("info:Sys", info.Sys())
-	// fmt.Println("--------------------------------")
 
 	infoTarget, err := os.Lstat(targetFileName)
 
@@ -205,10 +227,10 @@ func checkFile(e error) {
 }
 
 type settings struct {
-	IsActive     bool   `json:"isActive"`
-	TargetPath   string `json:"targetPath"`
-	UseMaker     bool   `json:"useMaker"`
-	SrcFilesPath string `json:"srcFilesPath"`
-	JsMakedPath  string `json:"jsMakedPath"`
-	CssMakedPath string `json:"cssMakedPath"`
+	IsActive     bool              `json:"isActive"`
+	TargetPath   string            `json:"targetPath"`
+	UseMaker     bool              `json:"useMaker"`
+	SrcFilesPath string            `json:"srcFilesPath"`
+	MakedPath    map[string]string `json:"makedPath"`
+	Verbose      bool
 }
