@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,11 +13,9 @@ import (
 	"strings"
 )
 
-var settingsValues settings
+var settings settingsType
 
 func main() {
-
-	// func Rename(oldpath, newpath string) error
 
 	cmdProject := flag.String("project", "test_project", "Указываем папку проекта")
 	cmdTask := flag.Int("task", 0, "Указываем номер задачи по проекту")
@@ -32,31 +31,23 @@ func main() {
 	}
 	fmt.Println("Пытаемся разобрать изменения в проекте", *cmdProject, "по задаче", *cmdTask)
 
-	if err := os.Chdir(*cmdProject); err != nil { //Меняем директорию на рабочую или паникуем
-		panic("Рабочая директория " + *cmdProject + " не найдена")
-		// panic(err)
+	if err := os.Chdir(*cmdProject); err != nil { //Меняем директорию на рабочую или выходим
+		fmt.Println("Рабочая директория " + *cmdProject + " не найдена")
+		os.Exit(-1)
 	}
 
-	//В папке проекта нас должен ждать файл с настройками
-	settingsFileName := filepath.Join(".go-deploy-config.json")
-	settingsFileData, err := os.ReadFile(settingsFileName)
-	checkFile(err)
+	err := settings.init(".go-deploy-config.json")
 
-	if err := json.Unmarshal(settingsFileData, &settingsValues); err != nil {
-		panic(err)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(-1)
 	}
-
-	settingsValues.Verbose = false
 
 	if *debug {
-		settingsValues.Verbose = true
+		settings.Verbose = true
 	}
 
-	if settingsValues.Verbose {
-		fmt.Println(settingsValues)
-	}
-
-	if !settingsValues.IsActive {
+	if !settings.IsActive {
 		fmt.Println("Проект не активен")
 		os.Exit(-1)
 	}
@@ -77,9 +68,10 @@ func main() {
 		fmt.Println(string(gitText))
 	}
 
-	reg := regexp.MustCompile(`(?mU)^(\w+)\s.*(` + fmt.Sprintf("%d", *cmdTask) + `):?.*$`)
+	reg := regexp.MustCompile(`(?mU)^(\w+)\s.*(` + fmt.Sprintf("%d", *cmdTask) + `):?\s.*$`)
 
 	affectedFiles := make(map[string]string)
+
 	for _, match := range reg.FindAllStringSubmatch(string(gitText), -1) {
 		if match[1] != "" {
 			var gitFilesText []byte
@@ -99,6 +91,7 @@ func main() {
 
 			for i := range lines {
 				file := strings.Trim(lines[i], "\n\r ")
+
 				affectedFiles[file] = file
 			}
 
@@ -109,12 +102,66 @@ func main() {
 		fmt.Println("Изменений по задаче не найдено")
 		os.Exit(1)
 	}
-	deployAffectedFlat(affectedFiles)
 
-}
-func deployAffectedFlat(affectedFiles map[string]string) {
 	for key := range affectedFiles {
 		deployFile(affectedFiles[key])
+	}
+
+	runMigartions(*cmdTask)
+}
+
+func runMigartions(task int) {
+	ext, exist := settings.Migrations["type"]
+
+	if !exist { //нет типа миграции
+		return
+	}
+
+	if err := os.Chdir(settings.TargetPath); err != nil { //Меняем директорию на целевую
+		if settings.Verbose {
+			fmt.Println("Не могу перейти в целевую директорию " + settings.TargetPath)
+		}
+		return
+	}
+
+	if settings.Verbose {
+		fmt.Println("Ищем миграции по задаче", task)
+	}
+	taskNum := fmt.Sprint(task)
+
+	migrationName := filepath.Join(".migrations", "migration-"+taskNum+"."+ext)
+
+	_, err := os.Lstat(migrationName)
+	if err != nil { //файла нет - делать нечего
+		fmt.Println("Миграции нет")
+		return
+	}
+	_, err_applied := os.Lstat(migrationName + ".applied")
+
+	if err_applied == nil { //есть примененная миграция, удаляем миграцию и выходим
+		fmt.Println("Миграция уже применена")
+		os.Rename(migrationName, migrationName+".applied")
+		return
+	}
+
+	os.Rename(migrationName, migrationName+".applied") //переименовываем чтобы не запускать второй раз
+
+	cmdText, exist := settings.Migrations["command"]
+	if !exist { //команды нет, выходим
+		fmt.Println("Не задана команда миграции")
+		return
+	}
+	cmdArgs, exist := settings.Migrations["command"]
+	if !exist { //аргументов нет
+		cmdArgs = ""
+	}
+
+	cmd := exec.Command(cmdText, cmdArgs)
+
+	out, errorText := cmd.CombinedOutput()
+	fmt.Println("Результат запуска миграции:", out)
+	if errorText != nil {
+		fmt.Println("Ошибки применения миграции:", errorText)
 	}
 }
 
@@ -123,31 +170,30 @@ func deployFile(affectedFile string) {
 	if file == ".gitignore" || file == ".gitkeep" || file == ".go-deploy-config.json" {
 		return
 	}
-	/*
-		if settingsValues.UseMaker { // Используется сборщик
-			ext := strings.Trim(filepath.Ext(file), ".")
-			fmt.Println("Возможно ориентироваться на .. или err != nil при определении вложенности папки")
-			rel, err := filepath.Rel(settingsValues.SrcFilesPath, dir)
-			fmt.Println(settingsValues.SrcFilesPath, dir, rel, err)
 
-			forType, exist := settingsValues.MakedPath[ext]
-			//exist показывает что настрока есть. если нет - можно не обрабатывать
-			fmt.Println(forType, exist)
+	if settings.UseMaker { // Используется сборщик
+		ext := strings.Trim(filepath.Ext(file), ".")
 
-			return
-		}*/
+		rel, err := filepath.Rel(settings.SrcFilesPath, dir)
 
-	targetFolder := filepath.Join(settingsValues.TargetPath, dir)
+		if rel != "." && (rel[:2] != ".." || err != nil) { //папка вложена
+			forType, exist := settings.MakedPath[ext] //exist показывает что настрока есть. если нет - можно не обрабатывать
+			if !exist {
+				return
+			}
+			deployFile(forType)
+		}
+	}
+
+	targetFolder := filepath.Join(settings.TargetPath, dir)
 	mustRemove := false
 	mustCreate := false
 
 	targetFileName := filepath.Join(targetFolder, file)
 
-	// fmt.Println(targetFileName)
-
 	info, err := os.Lstat(affectedFile)
 	if err != nil {
-		fmt.Println("Ошибка получения информации о файле " + affectedFile + ". Удаляем целевой файл")
+		fmt.Println(targetFileName + " удаляем")
 		mustRemove = true
 	}
 
@@ -155,10 +201,10 @@ func deployFile(affectedFile string) {
 
 	if err != nil {
 		if mustRemove {
-			fmt.Println("Целевой файл " + targetFileName + " Отсутствует. Продолжаем")
+			fmt.Println(targetFileName + " отсутствует")
 			return
 		}
-		fmt.Println("Ошибка получения информации о файле " + targetFileName + ". Возможно это знак его создать")
+		fmt.Println(targetFileName + " создаем")
 		mustCreate = true
 	}
 
@@ -166,14 +212,14 @@ func deployFile(affectedFile string) {
 		if !mustCreate {
 			err := os.Rename(targetFileName, targetFileName+".bak")
 			if err != nil {
-				fmt.Println("Ошибка создания резервной копии файла " + targetFileName)
+				fmt.Println(targetFileName + "ошибка создания резервной копии файла ")
 			}
 		}
 		if !mustRemove { //Переименовали старый, надо создать новый. Если надо
 
 			folderInfo, err := os.Lstat(dir)
 			if err != nil {
-				fmt.Println("Ошибка получения информации о папке файла " + dir)
+				fmt.Println(dir + "ошибка получения информации о папке файла ")
 			}
 
 			targetFolderInfo, err := os.Lstat(targetFolder)
@@ -183,18 +229,17 @@ func deployFile(affectedFile string) {
 
 			e := copyFile(affectedFile, targetFileName)
 			if e != nil {
-				panic(e)
+				fmt.Println("Ошибка копирования файла")
+				fmt.Println(e)
+				os.Exit(-1)
 			}
 		}
 	} else {
-		fmt.Println("Целевой файл " + targetFileName + " новее исходного. При необходимости перенесите руками")
+		fmt.Println(targetFileName + " новее исходного. При необходимости перенесите руками")
 	}
-
-	// os.Exit(8)
 }
 
-// копируем файл
-func copyFile(src string, dst string) (err error) {
+func copyFile(src string, dst string) (err error) { // копируем файл
 	sourcefile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -222,15 +267,32 @@ func copyFile(src string, dst string) (err error) {
 
 func checkFile(e error) {
 	if e != nil {
-		panic(e)
+		fmt.Println("Ошибка работы с файлом")
+		fmt.Println(e)
+		os.Exit(-1)
 	}
 }
 
-type settings struct {
-	IsActive     bool              `json:"isActive"`
-	TargetPath   string            `json:"targetPath"`
-	UseMaker     bool              `json:"useMaker"`
-	SrcFilesPath string            `json:"srcFilesPath"`
-	MakedPath    map[string]string `json:"makedPath"`
-	Verbose      bool
+type settingsType struct {
+	IsActive       bool              `json:"isActive"`
+	TargetPath     string            `json:"targetPath"`
+	UseMaker       bool              `json:"useMaker"`
+	SrcFilesPath   string            `json:"srcFilesPath"`
+	MakedPath      map[string]string `json:"makedPath"`
+	Migrations     map[string]string `json:"migrations"`
+	HaveMigraption bool
+	Verbose        bool
+}
+
+func (settings *settingsType) init(filename string) error {
+	settingsFileData, err := os.ReadFile(filename)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(settingsFileData, &settings); err != nil {
+		return errors.New("Ошибка разбора настроек")
+	}
+
+	settings.Verbose = false
+	return nil
 }

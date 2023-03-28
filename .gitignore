@@ -4,3 +4,4 @@
 *.bak
 #исполняемый для linux
 go-deploy 
+.migrations

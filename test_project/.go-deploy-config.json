@@ -5,6 +5,12 @@
   "srcFilesPath": "src",
   "makedPath": {
     "js" : "folderToMakedfiles/js/site.js",
-    "css" : "folderToMakedfiles/site.css"
+    "css" : "folderToMakedfiles/site.css",
+    "styl" : "folderToMakedfiles/site.css"
+  },
+  "migrations" :{
+    "command" : "php",
+    "cmdKeys" : "",
+    "type" : "php"
   }
 }
