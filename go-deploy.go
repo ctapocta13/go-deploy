@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var settings settingsType
@@ -29,6 +30,7 @@ func main() {
 		fmt.Println("Укажите номер задачи")
 		os.Exit(-1)
 	}
+
 	fmt.Println("Пытаемся разобрать изменения в проекте", *cmdProject, "по задаче", *cmdTask)
 
 	if err := os.Chdir(*cmdProject); err != nil { //Меняем директорию на рабочую или выходим
@@ -38,10 +40,7 @@ func main() {
 
 	err := settings.init(".go-deploy-config.json")
 
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(-1)
-	}
+	checkErr(err)
 
 	if *debug {
 		settings.Verbose = true
@@ -52,62 +51,21 @@ func main() {
 		os.Exit(-1)
 	}
 
-	var gitText []byte
-	if !*cmdTest {
-		gitText, err = exec.Command("git", "log", "--pretty=oneline").CombinedOutput()
-
-		if err != nil { //Ошибка выполнения команды
-			fmt.Println("Ошибка при получении списка коммитов. Проверьте наличие проекта и настройки git")
-			os.Exit(-1)
-		}
-	} else {
-		gitText, err = os.ReadFile("test_gitlog.txt")
-		checkFile(err)
-	}
-	if *debug {
-		fmt.Println(string(gitText))
-	}
-
-	reg := regexp.MustCompile(`(?mU)^(\w+)\s.*(` + fmt.Sprintf("%d", *cmdTask) + `):?\s.*$`)
-
-	affectedFiles := make(map[string]string)
-
-	for _, match := range reg.FindAllStringSubmatch(string(gitText), -1) {
-		if match[1] != "" {
-			var gitFilesText []byte
-			if !*cmdTest {
-				gitFilesText, err = exec.Command("git", "diff-tree", "--no-commit-id", "--name-only", "-r", match[1]).CombinedOutput()
-
-				if err != nil { //Ошибка выполнения команды
-					// panic("Ошибка при выполнении команды " + cmd.String())
-					panic(err)
-				}
-			} else {
-				gitFilesText, err = os.ReadFile(match[1] + ".txt")
-				checkFile(err)
-			}
-
-			lines := strings.Split(strings.Trim(string(gitFilesText), "\n\r"), "\n") //Вывод обрезаем для исключения пустой строки
-
-			for i := range lines {
-				file := strings.Trim(lines[i], "\n\r ")
-
-				affectedFiles[file] = file
-			}
-
-		}
-	}
-
-	if 0 == len(affectedFiles) {
-		fmt.Println("Изменений по задаче не найдено")
-		os.Exit(1)
-	}
+	affectedFiles, err := getCommitFiles(fmt.Sprintf("%d", *cmdTask), *cmdTest)
+	checkErr(err)
 
 	for key := range affectedFiles {
 		deployFile(affectedFiles[key])
 	}
 
 	runMigartions(*cmdTask)
+}
+
+func checkErr(err error) {
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(-1)
+	}
 }
 
 func runMigartions(task int) {
@@ -125,7 +83,7 @@ func runMigartions(task int) {
 	}
 
 	if settings.Verbose {
-		fmt.Println("Ищем миграции по задаче", task)
+		fmt.Println("Ищем миграцию по задаче", task)
 	}
 	taskNum := fmt.Sprint(task)
 
@@ -166,6 +124,9 @@ func runMigartions(task int) {
 }
 
 func deployFile(affectedFile string) {
+	fmt.Println("sleep 5 seconds")
+	time.Sleep(5 * time.Second)
+	fmt.Println("awake")
 	dir, file := filepath.Split(affectedFile)
 	if file == ".gitignore" || file == ".gitkeep" || file == ".go-deploy-config.json" {
 		return
@@ -295,4 +256,55 @@ func (settings *settingsType) init(filename string) error {
 
 	settings.Verbose = false
 	return nil
+}
+
+func getCommitFiles(task string, test bool) (map[string]string, error) {
+	var gitText []byte
+	var err error
+	affectedFiles := make(map[string]string)
+
+	if !test {
+		gitText, err = exec.Command("git", "log", "--pretty=oneline").CombinedOutput()
+
+		if err != nil { //Ошибка выполнения команды
+			fmt.Println("Ошибка при получении списка коммитов. Проверьте наличие проекта и настройки git")
+			return affectedFiles, err
+		}
+	} else {
+		gitText, err = os.ReadFile("test_gitlog.txt")
+		checkFile(err)
+	}
+
+	reg := regexp.MustCompile(`(?mU)^(\w+)\s.*(` + task + `):?\s.*$`)
+
+	for _, match := range reg.FindAllStringSubmatch(string(gitText), -1) {
+		if match[1] != "" {
+			var gitFilesText []byte
+			if !test {
+				gitFilesText, err = exec.Command("git", "diff-tree", "--no-commit-id", "--name-only", "-r", match[1]).CombinedOutput()
+
+				if err != nil { //Ошибка выполнения команды
+					return affectedFiles, err
+				}
+			} else {
+				gitFilesText, err = os.ReadFile(match[1] + ".txt")
+				checkFile(err)
+			}
+
+			lines := strings.Split(strings.Trim(string(gitFilesText), "\n\r"), "\n") //Вывод обрезаем для исключения пустой строки
+
+			for i := range lines {
+				file := strings.Trim(lines[i], "\n\r ")
+
+				affectedFiles[file] = file
+			}
+
+		}
+	}
+
+	if 0 == len(affectedFiles) {
+		err = errors.New("Изменений по задаче не найдено")
+	}
+
+	return affectedFiles, err
 }
